@@ -40,6 +40,8 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
         # Open image
         img = Image.open(image_path)
 
+        print(f"Image loaded with size {img.size} from {image_path}")
+
         # If there's an alpha channel, blend onto white background
         if img.mode == "RGBA":
             background = Image.new("RGBA", img.size, (255, 255, 255, 255))
