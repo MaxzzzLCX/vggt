@@ -5,5 +5,5 @@ eval "$(conda shell.bash hook)"
 conda activate vggt
 
 python test_scripts/VGGT_COLMAP.py \
-    --scene_dir "/Users/maxlyu/Documents/scenes/apple_window" \
+    --scene_dir "/Users/maxlyu/Documents/nutritionverse-3d-dataset/test_syn_2" \
     --conf_thres_value 0

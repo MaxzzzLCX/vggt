@@ -144,6 +144,30 @@ def run_VGGT(model, images, dtype, device, resolution=518):
     depth_conf = depth_conf.squeeze(0).cpu().numpy()
     return extrinsic, intrinsic, depth_map, depth_conf
 
+def calculate_conversion_factor(depth_map, gt_depth_map, sam_mask):
+    """Calculate the conversion factor between predicted depth and ground truth depth."""
+    
+    # Combine SAM mask and depth validity mask (if depth=0 in GT, it is background, not object)
+    mask = (sam_mask > 0) & (gt_depth_map > 0)
+
+    # Apply the SAM mask to both depth maps
+    depth_map_masked = depth_map[mask]
+    gt_depth_map_masked = gt_depth_map[mask]
+
+    # Randomly sample 100 points and compute the ratio, for testing purpose
+    for i in range(100):
+        sample_indices = np.random.choice(len(depth_map_masked), size=100, replace=False)
+        depth_map_masked = depth_map_masked[sample_indices]
+        gt_depth_map_masked = gt_depth_map_masked[sample_indices]
+        
+        print(f"{i} Predicted):", depth_map_masked)
+        print(f"{i} GT:", gt_depth_map_masked)
+        print(f"{i} Ratio:", gt_depth_map_masked / depth_map_masked)
+
+    # Compute the conversion factor
+    conversion_factor = np.mean(gt_depth_map_masked / depth_map_masked)
+
+    return conversion_factor
 
 def demo_fn(args):
     # Print configuration
