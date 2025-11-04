@@ -11,14 +11,16 @@ import trimesh
 import pyrender
 from PIL import Image
 
-def normalize_mesh(mesh, target_radius=1.0):
+def normalize_mesh(mesh, target_radius=1.0, return_scale=False):
     """Center mesh at origin and scale to fit within target_radius sphere."""
     bounds = mesh.bounds
     center = bounds.mean(axis=0)
     extent = bounds.ptp(axis=0)
-    scale = target_radius / (extent.max() / 2)
+    scale = target_radius / (extent.max() / 2.0)
     mesh.apply_translation(-center)
     mesh.apply_scale(scale)
+    if return_scale:
+        return mesh, scale
     return mesh
 
 def create_camera_positions(num_views=8, radius=2.5, elevation=20, rotation_axis='y'):
@@ -111,7 +113,7 @@ def main():
         # If it's a scene with multiple meshes, merge them
         mesh = trimesh.util.concatenate(mesh.dump())
     
-    mesh = normalize_mesh(mesh)
+    mesh, scale = normalize_mesh(mesh, return_scale=True)
     print(f"Mesh has {len(mesh.vertices)} vertices and {len(mesh.faces)} faces")
     
     if hasattr(mesh.visual, 'material'):
@@ -128,13 +130,14 @@ def main():
     for i, cam_pos in enumerate(camera_positions):
         print(f"  Rendering view {i+1}/{args.num_views}...", end='\r')
         
-        color, depth = render_view(mesh, cam_pos, width=args.width, height=args.height)
-        
+        color, depth_norm = render_view(mesh, cam_pos, width=args.width, height=args.height)
+        depth_m = depth_norm / scale  # if original mesh units were meters
+
         color_path = os.path.join(args.out_dir, f"view_{i:03d}_img.png")
         depth_path = os.path.join(args.out_dir, f"view_{i:03d}_depth.npy")
 
         Image.fromarray(color).save(color_path)
-        np.save(depth_path, depth)
+        np.save(depth_path, depth_m)
 
     print(f"\nDone! Images saved to {args.out_dir}")
 

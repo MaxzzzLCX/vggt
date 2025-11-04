@@ -7,6 +7,8 @@ import os
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Mesh Volume Estimation")
+    parser.add_argument("--point_path", required=True, help="Path to input point cloud (.ply)")
+    parser.add_argument("--mesh_path", required=True, help="Path to input mesh (.obj)")
     parser.add_argument("--visualize", action="store_true", help="Visualize the reconstructed mesh")
     return parser.parse_args()
 
@@ -278,8 +280,10 @@ def variance_in_ransac_volume_estimation(mesh_path, point_path, primitive, n_tri
 
 def main():
     args = parse_args() # Keep this for when running MeshVolume.py directly
-    mesh_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset/id-101-steak-piece-28g/poly.obj"
-    point_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset/test_steak/sparse_sam_conf0.0/points.ply"
+    mesh_file = args.mesh_path
+    point_file = args.point_path
+    # mesh_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset/id-101-steak-piece-28g/poly.obj"
+    # point_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset/test_steak/sparse_sam_conf0.0/points.ply"
     compare_reconstruction_methods(mesh_file, point_file, n_trials=5, visualize=args.visualize)
 
 if __name__ == "__main__":

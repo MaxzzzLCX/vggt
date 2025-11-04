@@ -46,6 +46,7 @@ def parse_args():
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
     parser.add_argument("--mask", action="store_true", default=False, help="Whether to use masks")
     parser.add_argument("--mask_dir", type=str, default="masks", help="Directory containing the mask images")
+    parser.add_argument("--scale_pointcloud", action="store_true", default=False, help="Scale point cloud to real-world units")
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     # Set use_ba default to False as it requires extra dependencies and is slow on CPU
@@ -144,28 +145,53 @@ def run_VGGT(model, images, dtype, device, resolution=518):
     depth_conf = depth_conf.squeeze(0).cpu().numpy()
     return extrinsic, intrinsic, depth_map, depth_conf
 
-def calculate_conversion_factor(depth_map, gt_depth_map, sam_mask):
+def load_gt_depthmap(image_path_list):
+    """
+    Load ground truth depth maps of each image from a folder
+    Each depth map is stored in a .npy file with the same base name as the image.
+    """
+    depth_maps = []
+    for img_path in image_path_list:
+        filename = os.path.basename(img_path)
+        depth_filename = f"{filename[8:-7]}depth.npy"  # Change resized_XXX_img.png to XXX_depth.npy
+
+        # Depth_path is in the parent's parent directory named "images"
+        depth_path = os.path.join(os.path.dirname(os.path.dirname(img_path)), "images", depth_filename)
+
+        print(depth_path)
+        depth_maps.append(np.load(depth_path))
+
+    # print(f"Depth map shape: {len(depth_maps)} {depth_maps[0].shape}")
+
+    depth_maps = np.stack(depth_maps, axis=0)  # Shape: (num_images, H, W)
+    print(f"After stacking, has shape {depth_maps.shape}")
+    return depth_maps
+
+def calculate_conversion_factor(depth_map, gt_depth_map, combined_mask):
     """Calculate the conversion factor between predicted depth and ground truth depth."""
     
-    # Combine SAM mask and depth validity mask (if depth=0 in GT, it is background, not object)
-    mask = (sam_mask > 0) & (gt_depth_map > 0)
+    # Combine mask (combination of sam and depth_conf map from VGGT) and depth validity mask (if depth=0 in GT, it is background, not object)
+    mask = (combined_mask > 0) & (gt_depth_map > 0)
 
     # Apply the SAM mask to both depth maps
     depth_map_masked = depth_map[mask]
     gt_depth_map_masked = gt_depth_map[mask]
 
     # Randomly sample 100 points and compute the ratio, for testing purpose
-    for i in range(100):
+    if len(depth_map_masked) > 100:
         sample_indices = np.random.choice(len(depth_map_masked), size=100, replace=False)
         depth_map_masked = depth_map_masked[sample_indices]
         gt_depth_map_masked = gt_depth_map_masked[sample_indices]
         
-        print(f"{i} Predicted):", depth_map_masked)
-        print(f"{i} GT:", gt_depth_map_masked)
-        print(f"{i} Ratio:", gt_depth_map_masked / depth_map_masked)
+        print(f"Predicted):", depth_map_masked)
+        print(f"GT:", gt_depth_map_masked)
+        print(f"Ratio:", gt_depth_map_masked / depth_map_masked)
 
     # Compute the conversion factor
     conversion_factor = np.mean(gt_depth_map_masked / depth_map_masked)
+    var = np.var(gt_depth_map_masked / depth_map_masked)
+
+    print(f"Conversion factor: {conversion_factor}, Variance: {var}")
 
     return conversion_factor
 
@@ -201,6 +227,7 @@ def demo_fn(args):
     # Get image paths and preprocess them
     image_dir = os.path.join(args.scene_dir, "resized_images")
     image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    
     if len(image_path_list) == 0:
         raise ValueError(f"No images found in {image_dir}")
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
@@ -220,6 +247,8 @@ def demo_fn(args):
     # Run VGGT to estimate camera and depth
     # Run with 518x518 images
     extrinsic, intrinsic, depth_map, depth_conf = run_VGGT(model, images, dtype, device, vggt_fixed_resolution)
+    print(f"VGGT depth_map shape: {depth_map.shape}")
+
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
 
     if args.use_ba:
@@ -419,6 +448,26 @@ def demo_fn(args):
         points_xyf = points_xyf[combined_mask]
         points_rgb = points_rgb[combined_mask]
 
+        
+        if args.scale_pointcloud:
+            print("Scaling point cloud to real-world units using GT depth maps...")
+
+            # Account for physical scale (VGGT predicts depth up to scale)
+            # depth_map is of shape (# images, H, W, 1)
+            # Load GT depth maps with the same dimensions
+
+            gt_depth_maps = load_gt_depthmap(image_path_list)
+            conversion_factor = calculate_conversion_factor(depth_map, gt_depth_maps, combined_mask)
+
+            # Scale the entire point cloud by the conversion factor
+            points_3d *= conversion_factor
+
+            # Also have to scale the camera translation accordingly
+            extrinsic_scaled = extrinsic.copy()
+            extrinsic_scaled[:, :3, 3] *= conversion_factor
+            extrinsic = extrinsic_scaled
+
+
         print("Converting to COLMAP format")
         reconstruction = batch_np_matrix_to_pycolmap_wo_track(
             points_3d,
@@ -442,20 +491,39 @@ def demo_fn(args):
         shared_camera=shared_camera,
     )
 
+    folder_name = f"sparse"
+
     if args.mask:
-        if args.use_ba:
-            print(f"Saving reconstruction to {args.scene_dir}/sparse_sam_ba_conf{args.conf_thres_value}")
-            sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_sam_ba_conf{args.conf_thres_value}")
-        else:
-            print(f"Saving reconstruction to {args.scene_dir}/sparse_sam_conf{args.conf_thres_value}")
-            sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_sam_conf{args.conf_thres_value}")
+        folder_name += "_sam"
     else:
-        if args.use_ba:
-            print(f"Saving reconstruction to {args.scene_dir}/sparse_nosam_ba_conf{args.conf_thres_value}")
-            sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_nosam_ba_conf{args.conf_thres_value}")
-        else:
-            print(f"Saving reconstruction to {args.scene_dir}/sparse_nosam_conf{args.conf_thres_value}")
-            sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_nosam_conf{args.conf_thres_value}")
+        folder_name += "_nosam"
+
+    if args.scale_pointcloud:
+        folder_name += "_scaled"
+    else:
+        folder_name += "_unscaled"
+
+    if args.use_ba:
+        folder_name += "_ba"
+    
+    folder_name += f"_conf{args.conf_thres_value}"
+
+    sparse_reconstruction_dir = os.path.join(args.scene_dir, folder_name)
+
+    # if args.mask:
+    #     if args.use_ba:
+    #         print(f"Saving reconstruction to {args.scene_dir}/sparse_sam_ba_conf{args.conf_thres_value}")
+    #         sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_sam_ba_conf{args.conf_thres_value}")
+    #     else:
+    #         print(f"Saving reconstruction to {args.scene_dir}/sparse_sam_conf{args.conf_thres_value}")
+    #         sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_sam_conf{args.conf_thres_value}")
+    # else:
+    #     if args.use_ba:
+    #         print(f"Saving reconstruction to {args.scene_dir}/sparse_nosam_ba_conf{args.conf_thres_value}")
+    #         sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_nosam_ba_conf{args.conf_thres_value}")
+    #     else:
+    #         print(f"Saving reconstruction to {args.scene_dir}/sparse_nosam_conf{args.conf_thres_value}")
+    #         sparse_reconstruction_dir = os.path.join(args.scene_dir, f"sparse_nosam_conf{args.conf_thres_value}")
     
     os.makedirs(sparse_reconstruction_dir, exist_ok=True)
     reconstruction.write(sparse_reconstruction_dir)
