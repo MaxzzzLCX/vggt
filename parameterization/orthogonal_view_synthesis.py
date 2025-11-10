@@ -49,6 +49,38 @@ def create_camera_positions(num_views=8, radius=2.5, elevation=20, rotation_axis
     
     return positions
 
+
+def create_camera_positions_orthogonal(radius=2.5, elevation=0, rotation_axis='y'):
+    """Create camera positions in three orthogonal viewpoints: top, side, side."""
+    positions = []
+    elevation_rad = np.radians(elevation)
+    
+    # Top view
+    positions.append([0, radius, 0])
+
+    # Side view 1
+    if rotation_axis.lower() == 'y':
+         
+        # Side view 1: azimuth = 0
+        azimuth = 2 * np.pi * 0 
+        x = radius * np.cos(elevation_rad) * np.cos(azimuth)
+        y = radius * np.sin(elevation_rad)
+        z = radius * np.cos(elevation_rad) * np.sin(azimuth)
+        positions.append([x, y, z])
+
+        # Side view 2: azimuth = 90 degrees
+        azimuth = np.pi * 0.5
+        x = radius * np.cos(elevation_rad) * np.cos(azimuth)
+        y = radius * np.sin(elevation_rad)
+        z = radius * np.cos(elevation_rad) * np.sin(azimuth)
+        positions.append([x, y, z])
+
+    else:
+        raise NotImplementedError("Currently only 'y' rotation_axis is supported for orthogonal views.")
+    
+    return positions
+
+
 def camera_intrinsics_from_yfov(width, height, yfov_deg):
     """Compute K (square pixels, zero skew) from vertical FOV and image size."""
     yfov = np.radians(yfov_deg)
@@ -93,23 +125,13 @@ def render_view(mesh, camera_pos, target=[0, 0, 0], width=518, height=518, yfov_
     renderer.delete()
     return color, depth_scene, K, T_wc
 
-def main():
-    parser = argparse.ArgumentParser(description="Render textured views around a mesh")
-    parser.add_argument("--mesh", required=True, help="Path to input mesh (.obj)")
-    parser.add_argument("--out_dir", required=True, help="Output directory")
-    parser.add_argument("--num_views", type=int, default=8)
-    parser.add_argument("--width", type=int, default=518)
-    parser.add_argument("--height", type=int, default=518)
-    parser.add_argument("--radius", type=float, default=2.5, help="Camera distance")
-    parser.add_argument("--elevation", type=float, default=20)
-    parser.add_argument("--rotation_axis", type=str, default="y", choices=["x","y","z"])
-    parser.add_argument("--yfov_deg", type=float, default=50.0)
-    args = parser.parse_args()
+def orthogonal_view_synthesis(mesh_path, output_dir, width=518, height=518, 
+                              radius=2.5, elevation=0, rotation_axis='y', yfov_deg=50.0,):
+    
+    os.makedirs(output_dir, exist_ok=True)
 
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    print(f"Loading mesh: {args.mesh}")
-    mesh = trimesh.load(args.mesh, force='mesh', process=False)
+    print(f"Loading mesh: {mesh_path}")
+    mesh = trimesh.load(mesh_path, force='mesh', process=False)
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate(mesh.dump())
 
@@ -118,33 +140,31 @@ def main():
 
     print(f"Mesh faces: {len(mesh.faces)}  vertices: {len(mesh.vertices)}")
 
-    camera_positions = create_camera_positions(
-        num_views=args.num_views,
-        radius=args.radius,
-        elevation=args.elevation,
-        rotation_axis=args.rotation_axis
+    camera_positions = create_camera_positions_orthogonal(
+        radius=radius,
+        elevation=elevation,
+        rotation_axis=rotation_axis
     )
 
     meta = {
-        "width": args.width,
-        "height": args.height,
-        "yfov_deg": args.yfov_deg,
+        "width": width,
+        "height": height,
+        "yfov_deg": yfov_deg,
         "views": []
     }
     Ks, T_wcs = [], []
 
-    print(f"Rendering {args.num_views} views...")
     for i, cam_pos in enumerate(camera_positions):
-        print(f"  Rendering view {i+1}/{args.num_views}...", end="\r")
+        print(f"  Rendering view {i+1}/{3}...", end="\r")
         color, depth_norm, K, T_wc = render_view(
-            mesh, cam_pos, width=args.width, height=args.height, yfov_deg=args.yfov_deg
+            mesh, cam_pos, width=width, height=height, yfov_deg=yfov_deg
         )
 
         # Convert Z-depth to metric assuming original mesh units were meters
         depth_m = depth_norm.astype(np.float32) / max(scale, 1e-12)
 
-        img_path = os.path.join(args.out_dir, f"view_{i:03d}_img.png")
-        depth_path = os.path.join(args.out_dir, f"view_{i:03d}_depth.npy")
+        img_path = os.path.join(output_dir, f"view_{i:03d}_img.png")
+        depth_path = os.path.join(output_dir, f"view_{i:03d}_depth.npy")
         Image.fromarray(color).save(img_path)
         np.save(depth_path, depth_m)
 
@@ -162,20 +182,44 @@ def main():
         Ks.append(K)
         T_wcs.append(T_wc_metric)
 
-    with open(os.path.join(args.out_dir, "cameras.json"), "w") as f:
+    with open(os.path.join(output_dir, "cameras.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
     # Optional: save calib for precise loading
     np.savez_compressed(
-        os.path.join(args.out_dir, "calib.npz"),
+        os.path.join(output_dir, "calib.npz"),
         K=np.stack(Ks, 0).astype(np.float32),
         T_wc=np.stack(T_wcs, 0).astype(np.float32),
-        width=np.int32(args.width),
-        height=np.int32(args.height),
-        yfov_deg=np.float32(args.yfov_deg),
+        width=np.int32(width),
+        height=np.int32(height),
+        yfov_deg=np.float32(yfov_deg),
         scale=np.float32(scale),
     )
     print("\nDone. Saved RGB, depth (meters via 1/scale), and calibration.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Render textured views around a mesh")
+    parser.add_argument("--mesh", required=True, help="Path to input mesh (.obj)")
+    parser.add_argument("--out_dir", required=True, help="Output directory")
+    parser.add_argument("--num_views", type=int, default=8)
+    parser.add_argument("--width", type=int, default=518)
+    parser.add_argument("--height", type=int, default=518)
+    parser.add_argument("--radius", type=float, default=2.5, help="Camera distance")
+    parser.add_argument("--elevation", type=float, default=20)
+    parser.add_argument("--rotation_axis", type=str, default="y", choices=["x","y","z"])
+    parser.add_argument("--yfov_deg", type=float, default=50.0)
+    args = parser.parse_args()
+
+    orthogonal_view_synthesis(
+        mesh_path = args.mesh,
+        out_dir = args.out_dir,
+        width = args.width,
+        height = args.height,
+        radius = args.radius,
+        elevation = args.elevation,
+        rotation_axis = args.rotation_axis,
+        yfov_deg = args.yfov_deg,
+    )
 
 if __name__ == "__main__":
     main()
