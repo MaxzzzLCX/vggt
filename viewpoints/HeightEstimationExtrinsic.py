@@ -13,6 +13,9 @@ def parse_args():
                     help="Path to object mask (.png/.jpg black&white or .npy).")
     ap.add_argument("--K_json", required=True, help="Path to cameras.json.")
     ap.add_argument("--reduce", type=str, default="median", choices=["median", "mean"], help="Aggregator for Z.")
+    ap.add_argument("--height_method", type=str, default="nearest", 
+                    choices=["nearest", "interp1d"],
+                    help="Method to sample height at footprint: nearest=NN lookup, interp1d=linear interp")
     return ap.parse_args()
 
 def load_camera_from_json(cameras_json: str, view_index: int):
@@ -86,51 +89,41 @@ def heights_from_side_world(world:np.ndarray, depth: np.ndarray, K: np.ndarray, 
 
 def get_height_functions(depth: np.ndarray, K: np.ndarray, T_wc: np.ndarray, mask: np.ndarray, variable: str):
     """
-    For the input image, return a height function (either h(z) or h(x)) based on viewing direction.
-    Currently, we don't consider viewpoints at arbitrary angles (say 45 degrees), only axis-aligned views.
-
-    variable: 'x', 'y', or 'z' indicating we want to get a function h(x) or h(z)
-    - Note: if variable is x, we are viewing along z-axis
-    - Note: if variable is z, we are viewing along x-axis
-
-    Return:
-        z/x-coordinates (1D array)
-        corresponding heights (1D array)
-    The indices across the two arrays align.
+    For the input image, return a height function (h(x) or h(z)).
+    variable: 'x' → return (x_coords, h_min, h_max)
+              'z' → return (z_coords, h_min, h_max)
     """
-
     if variable not in ['x', 'z']:
         raise NotImplementedError("viewing_axis must be 'x' or 'z'")
 
     H, W = depth.shape
 
-    
-    # World coords map for mapping column u to world x/z at center row (approximate)
+    # World coords for mapping; compute heights with mask across all rows
     world_coords = unproject_mask_to_world(depth, K, T_wc, mask=None)
+    _, height_min_m, height_max_m = heights_from_side_world(world_coords, depth, K, T_wc, mask)
 
-    # Compute per-column heights from 3D (world Y range), robust to perspective
-    u_idx, height_min_m, height_max_m = heights_from_side_world(world_coords,depth, K, T_wc, mask)
-
-    center_v = H // 2
-    center_row_world = world_coords[center_v, :, :]  # Wx3
-    valid_row = np.isfinite(center_row_world[:, 0])
+    # Build per-column representative x/z coordinate via median over valid pixels (robust to center-row holes)
+    valid_pix = mask & np.isfinite(depth) & (depth > 0)
+    xw = world_coords[..., 0]
+    zw = world_coords[..., 2]
+    with np.errstate(all='ignore'):
+        x_col = np.nanmedian(np.where(valid_pix, xw, np.nan), axis=0)  # (W,)
+        z_col = np.nanmedian(np.where(valid_pix, zw, np.nan), axis=0)  # (W,)
 
     if variable == 'z':
-        z_coords_row = center_row_world[valid_row, 2]
-        z_heights_min = height_min_m[valid_row]
-        z_heights_max = height_max_m[valid_row]
-        # Optionally drop NaNs
-        m = np.isfinite(z_heights_min) & np.isfinite(z_heights_max)
-        z_coords_row, z_heights_min, z_heights_max = z_coords_row[m], z_heights_min[m], z_heights_max[m]
-        return z_coords_row, z_heights_min, z_heights_max
+        coord = z_col
+    else:
+        coord = x_col
 
-    elif variable == 'x':
-        x_coords_row = center_row_world[valid_row, 0]
-        x_heights_min = height_min_m[valid_row]
-        x_heights_max = height_max_m[valid_row]
-        m = np.isfinite(x_heights_min) & np.isfinite(x_heights_max)
-        x_coords_row, x_heights_min, x_heights_max = x_coords_row[m], x_heights_min[m], x_heights_max[m]
-        return x_coords_row, x_heights_min, x_heights_max
+    # Keep only columns that have both coord and height
+    valid_col = np.isfinite(coord) & np.isfinite(height_min_m) & np.isfinite(height_max_m)
+    coord = coord[valid_col]
+    hmin = height_min_m[valid_col]
+    hmax = height_max_m[valid_col]
+
+    # Sort by coordinate to ensure a monotonic 1D mapping
+    order = np.argsort(coord)
+    return coord[order], hmin[order], hmax[order]
 
 def pixel_area_xz_from_world(world_coords: np.ndarray, mask: np.ndarray | None = None):
     """
@@ -169,30 +162,26 @@ def pixel_area_xz_from_world(world_coords: np.ndarray, mask: np.ndarray | None =
 
 def get_footprint(depth: np.ndarray, K: np.ndarray, T_wc: np.ndarray, mask: np.ndarray):
     """
-    This applies to the top view only. We want to get the (x,z) footprint of the object to define the range of height function h(x,z).
-    Return Nx2 array of (x,z) points in world coordinates, and an average pixel area (m^2).
+    Extract footprint points (x, z) from top view.
+    Returns: (N, 2) array of (x, z) world coordinates, pixel_area (float)
     """
+    world_coords = unproject_mask_to_world(depth, K, T_wc, mask)
     H, W = depth.shape
     
+    # Valid pixels: mask + finite depth
     valid = mask & np.isfinite(depth) & (depth > 0)
-    if not np.any(valid):
-        raise ValueError("No valid depth inside mask.")
-
-    # Calculate world points from mask
-    world_coords = unproject_mask_to_world(depth, K, T_wc, mask=mask)
-    print(f"World coords map shape: {world_coords.shape}")
-
-    # Vectorized average pixel area in x–z plane
-    area_map, cell_valid, mean_area = pixel_area_xz_from_world(world_coords, mask=mask)
-    num_cells = int(cell_valid.sum())
-    print(f"Valid footprint cells: {num_cells} / {(H-1)*(W-1)}")
-    print(f"Average pixel area in world x–z plane: {mean_area} m^2")
-
-    # Flatten valid footprint points (x,z)
-    footprint_points = world_coords[valid]
-    footprint_x_z = footprint_points[:, [0, 2]]  # Nx2 array of (x,z)
-
-    return footprint_x_z, mean_area
+    
+    # Extract (x, z) coordinates only
+    footprint_xz = world_coords[valid][:, [0, 2]]  # (N, 2): x, z
+    
+    # Compute pixel area - extract mean_area from tuple
+    area_map, cell_valid, mean_area = pixel_area_xz_from_world(world_coords, mask)
+    
+    print(f"Valid footprint cells: {cell_valid.sum()} / {cell_valid.size}")
+    print(f"Average pixel area in world x–z plane: {mean_area:.6e} m^2")
+    
+    # Return mean_area as float
+    return footprint_xz, float(mean_area)
 
 
 def unproject_mask_to_world(depth_m, K, T_wc, mask=None):
@@ -231,8 +220,55 @@ def unproject_mask_to_world(depth_m, K, T_wc, mask=None):
     world = np.stack([Xw_x, Xw_y, Xw_z], axis=-1).astype(np.float32)
     return world
 
-def height_estimation(depth_folder: str, mask_folder: str, K_json: str) -> float:
+def sample_height_at_point(x_pt, z_pt, x_coords, x_hmin, x_hmax, z_coords, z_hmin, z_hmax, 
+                            method="nearest"):
+    """
+    Sample height [h_min, h_max] at footprint point (x_pt, z_pt) using specified method.
+    
+    method='nearest': nearest-neighbor in 1D coord arrays
+    method='interp1d': linear interpolation in 1D coord arrays
+    
+    Returns: (h_min, h_max) in meters
+    """
+    if method == "nearest":
+        # Nearest neighbor
+        x_idx = np.argmin(np.abs(x_coords - x_pt))
+        z_idx = np.argmin(np.abs(z_coords - z_pt))
+        h_max = min(x_hmax[x_idx], z_hmax[z_idx])
+        h_min = max(x_hmin[x_idx], z_hmin[z_idx])
+        return h_min, h_max
+    
+    elif method == "interp1d":
+        # Linear interpolation in 1D
+        from scipy.interpolate import interp1d
+        # Interpolate x-side heights
+        if len(x_coords) < 2:
+            x_h_min_interp = x_hmin[0] if len(x_hmin) > 0 else 0.0
+            x_h_max_interp = x_hmax[0] if len(x_hmax) > 0 else 0.0
+        else:
+            f_xmin = interp1d(x_coords, x_hmin, kind='linear', bounds_error=False, fill_value='extrapolate')
+            f_xmax = interp1d(x_coords, x_hmax, kind='linear', bounds_error=False, fill_value='extrapolate')
+            x_h_min_interp = float(f_xmin(x_pt))
+            x_h_max_interp = float(f_xmax(x_pt))
+        
+        # Interpolate z-side heights
+        if len(z_coords) < 2:
+            z_h_min_interp = z_hmin[0] if len(z_hmin) > 0 else 0.0
+            z_h_max_interp = z_hmax[0] if len(z_hmax) > 0 else 0.0
+        else:
+            f_zmin = interp1d(z_coords, z_hmin, kind='linear', bounds_error=False, fill_value='extrapolate')
+            f_zmax = interp1d(z_coords, z_hmax, kind='linear', bounds_error=False, fill_value='extrapolate')
+            z_h_min_interp = float(f_zmin(z_pt))
+            z_h_max_interp = float(f_zmax(z_pt))
+        
+        h_max = min(x_h_max_interp, z_h_max_interp)
+        h_min = max(x_h_min_interp, z_h_min_interp)
+        return h_min, h_max
+    
+    else:
+        raise ValueError(f"Unknown height_method: {method}")
 
+def height_estimation(depth_folder: str, mask_folder: str, K_json: str, height_method: str = "nearest") -> float:
     # Top View (assume index 0)
     print("=="*20)
     print(f"Processing Top View")
@@ -243,7 +279,6 @@ def height_estimation(depth_folder: str, mask_folder: str, K_json: str) -> float
     H, W = depth.shape
     mask = load_mask_any(mask_path, (H, W))
 
-    # Use top view index 0 for top view
     K_top, T_wc_top, Wj, Hj = load_camera_from_json(K_json, 0)
     if Hj and Wj and (H != Hj or W != Wj):
         raise ValueError(f"Depth/mask shape ({H},{W}) != cameras.json ({Hj},{Wj})")
@@ -251,7 +286,7 @@ def height_estimation(depth_folder: str, mask_folder: str, K_json: str) -> float
     footprint_points, pixel_area = get_footprint(depth, K_top, T_wc_top, mask)
     print(f"Footprint points shape {footprint_points.shape} extracted.")
 
-    # Two side views: indices 1 and 2 (adjust if your cameras.json ordering differs)
+    # Two side views: indices 1 and 2
     views = ["Side1", "Side2"]
     side_indices = [1, 2]
 
@@ -262,43 +297,47 @@ def height_estimation(depth_folder: str, mask_folder: str, K_json: str) -> float
         depth_map_path = os.path.join(depth_folder, f"view_00{i+1}_depth.npy")
         mask_path = os.path.join(mask_folder, f"resized_view_00{i+1}_img_mask_1.png")
 
-        depth = np.load(depth_map_path).astype(np.float32)
-        H, W = depth.shape
-        mask = load_mask_any(mask_path, (H, W))
+        depth_i = np.load(depth_map_path).astype(np.float32)
+        H_i, W_i = depth_i.shape
+        mask_i = load_mask_any(mask_path, (H_i, W_i))
 
         K_i, T_wc_i, Wj, Hj = load_camera_from_json(K_json, side_indices[i])
-        if Hj and Wj and (H != Hj or W != Wj):
-            raise ValueError(f"Depth/mask shape ({H},{W}) != cameras.json ({Hj},{Wj})")
+        if Hj and Wj and (H_i != Hj or W_i != Wj):
+            raise ValueError(f"Depth/mask shape ({H_i},{W_i}) != cameras.json ({Hj},{Wj})")
 
         if view == "Side1":
-            z_coords_row, z_heights_min, z_heights_max = get_height_functions(depth, K_i, T_wc_i, mask, "z")
+            z_coords_row, z_heights_min, z_heights_max = get_height_functions(depth_i, K_i, T_wc_i, mask_i, "z")
         elif view == "Side2":
-            x_coords_row, x_heights_min, x_heights_max = get_height_functions(depth, K_i, T_wc_i, mask, "x")
+            x_coords_row, x_heights_min, x_heights_max = get_height_functions(depth_i, K_i, T_wc_i, mask_i, "x")
 
-    # Integration remains as you have; consider weighting by per-cell area instead of mean_area for better accuracy.
+    # Integration with configurable sampling method
     height_total = 0.0
     x = []
     z = []
     h_max = []
     h_min = []
     h = []
+    
+    print(f"Using height sampling method: {height_method}")
+    
     for i in range(footprint_points.shape[0]):
         x_pt, z_pt = footprint_points[i]
         
-        # Nearest-neighbor in 1D (approx). For better accuracy, project (x_pt,z_pt,0) into each side image and sample there.
-        x_idx = np.argmin(np.abs(x_coords_row - x_pt))
-        z_idx = np.argmin(np.abs(z_coords_row - z_pt))
-        height_max = min(x_heights_max[x_idx], z_heights_max[z_idx])
-        height_min = max(x_heights_min[x_idx], z_heights_min[z_idx])
-        height_final = max(0.0, height_max - height_min)
+        hmin, hmax = sample_height_at_point(
+            x_pt, z_pt,
+            x_coords_row, x_heights_min, x_heights_max,
+            z_coords_row, z_heights_min, z_heights_max,
+            method=height_method
+        )
+        
+        height_final = max(0.0, hmax - hmin)
         height_total += height_final
 
         x.append(x_pt)
         z.append(z_pt)
-        h_max.append(height_max)
-        h_min.append(height_min)
+        h_max.append(hmax)
+        h_min.append(hmin)
         h.append(height_final)
-
 
     volume_estimate = height_total * pixel_area
     print("=="*20)
@@ -320,7 +359,7 @@ def height_estimation(depth_folder: str, mask_folder: str, K_json: str) -> float
     ax2d.set_xlim(np.min(x), np.max(x))
     ax2d.set_ylim(np.min(z), np.max(z))
 
-    output_dir = os.path.join(Path(depth_folder).parent, "height_estimation_extrinsic")
+    output_dir = os.path.join(Path(depth_folder).parent, f"height_estimation_extrinsic_M-{height_method}")
     os.makedirs(output_dir, exist_ok=True)
 
     height_fig_path = os.path.join(output_dir, 'height.png')
@@ -359,13 +398,10 @@ def height_estimation(depth_folder: str, mask_folder: str, K_json: str) -> float
 
     ax.set_box_aspect((x_span, z_span, h_span))
 
-
-
     out3d = os.path.join(output_dir, 'height_3d_scatter.png')
     print(f"Saving 3D scatter to {out3d}")
     fig.savefig(out3d, dpi=300)
     plt.close(fig)
-
 
     return volume_estimate
 
@@ -375,7 +411,8 @@ def main():
     height_estimation(
         depth_folder=args.depth,
         mask_folder=args.mask,
-        K_json=args.K_json
+        K_json=args.K_json,
+        height_method=args.height_method
     )
 
 

@@ -17,6 +17,9 @@ def parse_args():
     parser.add_argument("--end_index", type=int, required=True, help="End index of objects to process")
     parser.add_argument("--save_csv", action='store_true', help="Whether to save results to CSV file")
     parser.add_argument("--save_npy", action='store_true', help="Whether to save intermediate numpy files")
+    parser.add_argument("--height_method", type=str, default="nearest", 
+                    choices=["nearest", "interp1d", "project"],
+                    help="Method to sample height at footprint: nearest=NN lookup, interp1d=linear interp, project=reproject to image")
     return parser.parse_args()
 
 
@@ -49,7 +52,7 @@ def main():
 
     if args.save_csv:
         # Write CSV header
-        result_csv = os.path.join(args.dataset_folder, f'height_estimation_extrinsic_{args.start_index}_{args.end_index}.csv')
+        result_csv = os.path.join(args.dataset_folder, f'height_estimation_extrinsic_M-{args.height_method}_{args.start_index}_{args.end_index}.csv')
         with open(result_csv, mode='w', newline='') as file:
             fieldnames = ['Object', 'GT Volume', 'Estimated Volume', 'Error Percentage']
             writer = csv.DictWriter(file, fieldnames=fieldnames)
@@ -78,7 +81,8 @@ def main():
         estimated_volume = HeightEstimationExtrinsic.height_estimation(
             depth_folder=str(depth_folder),
             mask_folder=str(mask_folder),
-            K_json=str(K_json_path)
+            K_json=str(K_json_path),
+            height_method=args.height_method
         )
 
         if gt_volume is None:
@@ -109,7 +113,7 @@ def main():
             all_error_pcts.append(error_pct)
     
     if args.save_npy:
-        npz_path = os.path.join(args.dataset_folder, f'height_estimation_extrinsic_{args.start_index}_{args.end_index}.npz')
+        npz_path = os.path.join(args.dataset_folder, f'height_estimation_extrinsic_M-{args.height_method}_{args.start_index}_{args.end_index}.npz')
         np.savez_compressed(
             npz_path,
             objects=all_objects,

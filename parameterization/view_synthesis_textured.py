@@ -62,18 +62,12 @@ def camera_intrinsics_from_yfov(width, height, yfov_deg):
                      [0.0, fy, cy],
                      [0.0, 0.0, 1.0]], dtype=np.float32)
 
-def render_view(mesh, camera_pos, target=[0, 0, 0], width=518, height=518, yfov_deg=50.0):
-    """Returns color (HxWx3 uint8), depth (HxW float32 in scene units), K (3x3), T_wc (4x4)."""
-    scene = pyrender.Scene(ambient_light=[0.3, 0.3, 0.3])
-    scene.add(pyrender.Mesh.from_trimesh(mesh))
-    scene.add(pyrender.DirectionalLight(color=[1, 1, 1], intensity=3.0), pose=np.eye(4))
-
+def render_view(scene, camera_node, renderer, camera_pos, target=[0, 0, 0], width=518, height=518, yfov_deg=50.0):
+    """Update camera pose and render. Returns color, depth, K, T_wc."""
     K = camera_intrinsics_from_yfov(width, height, yfov_deg)
-    camera = pyrender.PerspectiveCamera(yfov=np.radians(yfov_deg))
 
     # Build T_wc (camera-to-world).
-    # pyrender expects the camera to look along its -Z axis, so set +Z to point from target -> camera (backward).
-    z = np.array(camera_pos, dtype=np.float32) - np.array(target, dtype=np.float32)  # camera +Z = backward
+    z = np.array(camera_pos, dtype=np.float32) - np.array(target, dtype=np.float32)
     z /= np.linalg.norm(z)
     x = np.cross([0, 1, 0], z)
     if np.linalg.norm(x) < 1e-6:
@@ -86,11 +80,10 @@ def render_view(mesh, camera_pos, target=[0, 0, 0], width=518, height=518, yfov_
     T_wc[:3, 2] = z
     T_wc[:3, 3] = np.array(camera_pos, dtype=np.float32)
 
-    scene.add(camera, pose=T_wc)
+    # Update camera pose in scene
+    scene.set_pose(camera_node, T_wc)
 
-    renderer = pyrender.OffscreenRenderer(width, height)
-    color, depth_scene = renderer.render(scene)  # depth is Z-depth in scene units
-    renderer.delete()
+    color, depth_scene = renderer.render(scene)
     return color, depth_scene, K, T_wc
 
 def main():
@@ -118,6 +111,16 @@ def main():
 
     print(f"Mesh faces: {len(mesh.faces)}  vertices: {len(mesh.vertices)}")
 
+    # Build scene once
+    scene = pyrender.Scene(ambient_light=[0.3, 0.3, 0.3])
+    scene.add(pyrender.Mesh.from_trimesh(mesh))
+    scene.add(pyrender.DirectionalLight(color=[1, 1, 1], intensity=3.0), pose=np.eye(4))
+    camera = pyrender.PerspectiveCamera(yfov=np.radians(args.yfov_deg))
+    camera_node = scene.add(camera, pose=np.eye(4))  # Placeholder pose
+
+    # Create renderer once
+    renderer = pyrender.OffscreenRenderer(args.width, args.height)
+
     camera_positions = create_camera_positions(
         num_views=args.num_views,
         radius=args.radius,
@@ -137,7 +140,8 @@ def main():
     for i, cam_pos in enumerate(camera_positions):
         print(f"  Rendering view {i+1}/{args.num_views}...", end="\r")
         color, depth_norm, K, T_wc = render_view(
-            mesh, cam_pos, width=args.width, height=args.height, yfov_deg=args.yfov_deg
+            scene, camera_node, renderer, cam_pos,
+            width=args.width, height=args.height, yfov_deg=args.yfov_deg
         )
 
         # Convert Z-depth to metric assuming original mesh units were meters
@@ -162,10 +166,12 @@ def main():
         Ks.append(K)
         T_wcs.append(T_wc_metric)
 
+    # Clean up renderer once at the end
+    renderer.delete()
+
     with open(os.path.join(args.out_dir, "cameras.json"), "w") as f:
         json.dump(meta, f, indent=2)
 
-    # Optional: save calib for precise loading
     np.savez_compressed(
         os.path.join(args.out_dir, "calib.npz"),
         K=np.stack(Ks, 0).astype(np.float32),

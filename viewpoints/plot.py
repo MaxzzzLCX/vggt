@@ -77,12 +77,12 @@ def compare_two_error_histograms(npz_file1, npz_file2, label1='Method 1', label2
 
 def main():
     # npz_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_results_0_105.npz"
-    npz_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_extrinsic_0_105.npz"
-    single_error_histogram(npz_file)
+    # npz_file = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_extrinsic_fixbug_0_105.npz"
+    # single_error_histogram(npz_file)
 
-    # npz_file_1 = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_results_0_105.npz"
-    # npz_file_2 = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_extrinsic_0_105.npz"
-    # compare_two_error_histograms(npz_file_1, npz_file_2, label1='Intrinsic', label2='Extrinsic')
+    npz_file_1 = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_results_0_105.npz"
+    npz_file_2 = "/Users/maxlyu/Documents/nutritionverse-3d-dataset-manual/height_estimation_extrinsic_fixbug_0_105.npz"
+    compare_two_error_histograms(npz_file_1, npz_file_2, label1='Intrinsic', label2='Extrinsic')
 
 
 if __name__ == "__main__":
