@@ -4,7 +4,7 @@ cd "/Users/maxlyu/Documents/vggt"
 eval "$(conda shell.bash hook)"
 conda activate vggt
 
-python test_scripts/VGGT_COLMAP.py \
+python test_scripts/VGGT_COLMAP_BA.py \
     --scene_dir "/Users/maxlyu/Documents/scenes/apple_ba" \
     --mask \
     --mask_dir "/Users/maxlyu/Documents/scenes/apple_ba/masks" \

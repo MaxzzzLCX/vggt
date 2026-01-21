@@ -69,15 +69,24 @@ def plot_stats(method_names, success, totals, errors, out_dir: Path):
     # 1) Success rate bar chart
     rates = [(success[m] / totals) * 100.0 if totals > 0 else 0.0 for m in method_names]
     plt.figure(figsize=(max(6, 0.6*len(method_names)), 4))
-    x = np.arange(len(method_names))
-    bars = plt.bar(x, rates, color="#4C78A8")
+    
+    # Create positions with gap after 5th method
+    positions_success = list(range(1, 6)) + list(range(7, 7 + len(method_names) - 5)) if len(method_names) > 5 else list(range(1, len(method_names) + 1))
+    
+    bars = plt.bar(positions_success, rates, color="#4C78A8")
     plt.ylabel("Success rate (%)")
-    plt.xticks(x, method_names, rotation=45, ha="right")
+    plt.xticks(positions_success, method_names, rotation=45, ha="right")
     plt.ylim(0, 100)
     plt.title("Success rate per method")
-    # optional labels
-    for b, r in zip(bars, rates):
-        plt.text(b.get_x() + b.get_width()/2, b.get_height() + 1, f"{r:.1f}%", ha="center", va="bottom", fontsize=8)
+    
+    # Add vertical separator line
+    if len(method_names) > 5:
+        plt.axvline(x=6, color='gray', linestyle='--', linewidth=2, alpha=0.5)
+    
+    # Optional labels on bars
+    for pos, b, r in zip(positions_success, bars, rates):
+        plt.text(pos, b.get_height() + 1, f"{r:.1f}%", ha="center", va="bottom", fontsize=8)
+    
     plt.tight_layout()
     plt.savefig(out_dir / "success_rate_per_method.png", dpi=200)
     plt.close()
@@ -86,7 +95,7 @@ def plot_stats(method_names, success, totals, errors, out_dir: Path):
     err_data = [(m, np.array(errors[m], dtype=float)) for m in method_names if len(errors[m]) > 0]
     
     # NOTE: Remove the "sphere_ransac_mean" method from plots if present (error too large)
-    err_data = [(m, arr) for m, arr in err_data if m != "sphere_ransac_mean"]
+    # err_data = [(m, arr) for m, arr in err_data if m != "sphere_ransac_mean"]
 
     # Skip if no error data
     
@@ -98,10 +107,22 @@ def plot_stats(method_names, success, totals, errors, out_dir: Path):
 
     # 2) Error boxplot (distribution per method)
     plt.figure(figsize=(max(6, 0.6*len(labels)), 4))
-    plt.boxplot(arrays, labels=labels, showfliers=False)
+    
+    # Create positions with gap after 5th method
+    positions = list(range(1, 6)) + list(range(7, 7 + len(labels) - 5)) if len(labels) > 5 else list(range(1, len(labels) + 1))
+    
+    bp = plt.boxplot(arrays, labels=labels, showfliers=False, positions=positions, widths=0.6)
     plt.ylabel("Error (%)")
-    plt.title("Error distribution per method")
-    plt.xticks(rotation=45, ha="right")
+    plt.yscale('log')
+    plt.title("Error distribution per method (log scale)")
+    plt.xticks(positions, labels, rotation=45, ha="right")
+    
+    # Add visual separator and labels
+    if len(labels) > 5:
+        # Vertical dashed line at gap
+        plt.axvline(x=6, color='gray', linestyle='--', linewidth=2, alpha=0.5)
+        
+    
     plt.tight_layout()
     plt.savefig(out_dir / "error_boxplot_per_method.png", dpi=200)
     plt.close()
@@ -114,11 +135,19 @@ def plot_stats(method_names, success, totals, errors, out_dir: Path):
     err_upper = q3 - med
 
     plt.figure(figsize=(max(6, 0.6*len(labels)), 4))
-    xx = np.arange(len(labels))
-    plt.bar(xx, med, yerr=[err_lower, err_upper], capsize=4, color="#F58518")
+    
+    # Use same positions as boxplot for consistency
+    positions_bar = list(range(1, 6)) + list(range(7, 7 + len(labels) - 5)) if len(labels) > 5 else list(range(1, len(labels) + 1))
+    
+    plt.bar(positions_bar, med, yerr=[err_lower, err_upper], capsize=4, color="#F58518")
     plt.ylabel("Median error (%)")
     plt.title("Median error per method (IQR error bars)")
-    plt.xticks(xx, labels, rotation=45, ha="right")
+    plt.xticks(positions_bar, labels, rotation=45, ha="right")
+    
+    # Add vertical separator line
+    if len(labels) > 5:
+        plt.axvline(x=6, color='gray', linestyle='--', linewidth=2, alpha=0.5)
+    
     plt.tight_layout()
     plt.savefig(out_dir / "error_median_bar_per_method.png", dpi=200)
     plt.close()
