@@ -1,0 +1,39 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug VGGT COLMAP via Bash",
+            "type": "node",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_scripts/reconstruction_with_segmentation.sh",
+            "runtimeExecutable": "bash",
+            "runtimeArgs": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug VGGT COLMAP Python",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/test_scripts/VGGT_COLMAP.py",
+            "args": [
+                "--scene_dir", "/scratch/cl927/scenes_sam3dvggt/apple_new",
+                "--mask",
+                "--mask_dir", "/scratch/cl927/scenes_sam3dvggt/apple_new/masks",
+                "--conf_thres_value", "0"
+            ],
+            "cwd": "${workspaceFolder}",
+            "python": "/scratch/cl927/miniconda3/envs/vggt/bin/python",
+            "env": {
+                "PYTHONPATH": "/scratch/cl927/vggt:${env:PYTHONPATH}",
+                "CUDA_VISIBLE_DEVICES": "0"
+            },
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "stopOnEntry": false
+        }
+    ]
+}

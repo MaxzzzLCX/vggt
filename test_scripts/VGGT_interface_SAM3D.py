@@ -4,11 +4,19 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+import os
+
+# Set cache directories BEFORE any other imports to avoid permission issues with missing home directory
+CACHE_DIR = "/scratch/cl927/.vggt_cache"
+os.makedirs(CACHE_DIR, exist_ok=True)
+os.environ["HF_HOME"] = CACHE_DIR
+os.environ["HUGGINGFACE_HUB_CACHE"] = CACHE_DIR
+os.environ["TRANSFORMERS_CACHE"] = CACHE_DIR
+os.environ["HF_DATASETS_CACHE"] = CACHE_DIR
 
 import random
 import numpy as np
 import glob
-import os
 import copy
 import torch
 import torch.nn.functional as F
@@ -44,8 +52,10 @@ from vggt.dependency.np_to_pycolmap import batch_np_matrix_to_pycolmap, batch_np
 def parse_args():
     parser = argparse.ArgumentParser(description="VGGT Demo")
     parser.add_argument("--scene_dir", type=str, required=True, help="Directory containing the scene images")
+    parser.add_argument("--image_dir", type=str, default="resized_images", help="Directory name containing the input images (relative to scene_dir)")
     parser.add_argument("--mask", action="store_true", default=False, help="Whether to use masks")
     parser.add_argument("--mask_dir", type=str, default="masks", help="Directory containing the mask images")
+    parser.add_argument("--select_images", type=str, default=None, help="Comma-separated list of image names or indices (e.g., 'render_000,render_001' or '0,1,5')")
     parser.add_argument("--scale_pointcloud", action="store_true", default=False, help="Scale point cloud to real-world units")
 
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -155,8 +165,9 @@ def load_gt_depthmap(image_path_list):
         filename = os.path.basename(img_path)
         depth_filename = f"{filename[8:-7]}depth.npy"  # Change resized_XXX_img.png to XXX_depth.npy
 
-        # Depth_path is in the parent's parent directory named "images"
-        depth_path = os.path.join(os.path.dirname(os.path.dirname(img_path)), "images", depth_filename)
+        # Depth_path is in the parent directory named "images" (assuming original structure)
+        scene_dir = os.path.dirname(os.path.dirname(img_path))  # Go up from image_dir to scene_dir
+        depth_path = os.path.join(scene_dir, "images", depth_filename)
 
         print(depth_path)
         depth_maps.append(np.load(depth_path))
@@ -226,15 +237,54 @@ def demo_fn(args):
     print(f"Model loaded")
 
     # Get image paths and preprocess them
-    image_dir = os.path.join(args.scene_dir, "resized_images")
-    image_path_list = glob.glob(os.path.join(image_dir, "*"))
+    image_dir = os.path.join(args.scene_dir, args.image_dir)
+    
+    # Only load actual image files, not JSON or other files
+    image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tiff', '*.tif']
+    image_path_list = []
+    for ext in image_extensions:
+        image_path_list.extend(glob.glob(os.path.join(image_dir, ext)))
+        image_path_list.extend(glob.glob(os.path.join(image_dir, ext.upper())))
     
     if len(image_path_list) == 0:
-        raise ValueError(f"No images found in {image_dir}")
+        raise ValueError(f"No images found in {image_dir} (using image_dir='{args.image_dir}')")
     
-    # Sort image paths to ensure consistent ordering (resized_01.png, resized_02.png, etc.)
+    # Sort image paths to ensure consistent ordering (render_000.png, render_001.png, etc.)
     image_path_list.sort()
     
+    # Filter images if selection is specified
+    if args.select_images:
+        selected_images = []
+        selections = [s.strip() for s in args.select_images.split(',')]
+        
+        for selection in selections:
+            if selection.isdigit():
+                # Selection by index (e.g., "0", "1", "5")
+                idx = int(selection)
+                if 0 <= idx < len(image_path_list):
+                    selected_images.append(image_path_list[idx])
+                else:
+                    print(f"Warning: Index {idx} out of range (0-{len(image_path_list)-1})")
+            else:
+                # Selection by name (e.g., "render_000", "render_001")
+                # Look for matching files
+                found = False
+                for img_path in image_path_list:
+                    img_name = os.path.splitext(os.path.basename(img_path))[0]  # Remove extension
+                    if img_name == selection or os.path.basename(img_path) == selection:
+                        selected_images.append(img_path)
+                        found = True
+                        break
+                if not found:
+                    print(f"Warning: Image '{selection}' not found in directory")
+        
+        if selected_images:
+            image_path_list = selected_images
+            print(f"Selected {len(selected_images)} images: {[os.path.basename(p) for p in selected_images]}")
+        else:
+            print("Warning: No valid images selected, using all images")
+    
+    # Create base image path list (always needed)
     base_image_path_list = [os.path.basename(path) for path in image_path_list]
 
     # Load images and original coordinates
@@ -262,7 +312,9 @@ def demo_fn(args):
     points_3d = unproject_depth_map_to_point_map(depth_map, extrinsic, intrinsic)
     
     # Save VGGT predicted camera poses and point clouds
-    camera_pose_file_path = os.path.join(args.scene_dir, "vggt_camera_poses.npz")
+    output_base_dir = os.path.join(args.scene_dir, "SAM3D_multiview_prediction")
+    os.makedirs(output_base_dir, exist_ok=True)
+    camera_pose_file_path = os.path.join(output_base_dir, "vggt_camera_poses.npz")
     np.savez(camera_pose_file_path, 
              extrinsic=extrinsic, 
              intrinsic=intrinsic,
@@ -291,8 +343,9 @@ def demo_fn(args):
         ba_masks = None
         if args.mask:
             print(f"Loading masks from {args.mask_dir} for Bundle Adjustment...")
-            # Load masks at the same resolution as the images being passed to the tracker
-            segment_masks = load_masks(args.mask_dir, image_path_list, device, img_load_resolution)
+            # --- FIX: Convert relative mask_dir to absolute path ---
+            mask_dir_full = os.path.join(args.scene_dir, args.mask_dir)
+            segment_masks = load_masks(mask_dir_full, image_path_list, device, img_load_resolution)
             
             # The tracker expects masks at the model's resolution (518x518)
             ba_masks = F.interpolate(
@@ -447,8 +500,9 @@ def demo_fn(args):
         # (2) Combine the confidence mask with SAM2 mask, if provided
         if args.mask:
             print(f"Loading masks from {args.mask_dir}...")
-            # --- FIX: Pass the target resolution to load_masks ---
-            segment_masks = load_masks(args.mask_dir, image_path_list, device, img_load_resolution) # (num_images, H, W) boolean tensor
+            # --- FIX: Convert relative mask_dir to absolute path ---
+            mask_dir_full = os.path.join(args.scene_dir, args.mask_dir)
+            segment_masks = load_masks(mask_dir_full, image_path_list, device, img_load_resolution) # (num_images, H, W) boolean tensor
             
             # The masks are now already at 1024x1024, so we still need to resize to the model's resolution
             segment_masks_resized = F.interpolate(
@@ -513,12 +567,30 @@ def demo_fn(args):
         shared_camera=shared_camera,
     )
 
-    folder_name = f"sparse"
+    folder_name = f"VGGT"
+    
+    # Add view information if specific images were selected
+    if args.select_images:
+        selections = [s.strip() for s in args.select_images.split(',')]
+        # Convert any image names to indices for consistent naming
+        view_indices = []
+        for selection in selections:
+            if selection.isdigit():
+                view_indices.append(selection)
+            else:
+                # Find the index of this image name
+                for idx, img_path in enumerate(image_path_list):
+                    img_name = os.path.splitext(os.path.basename(img_path))[0]
+                    if img_name == selection or os.path.basename(img_path) == selection:
+                        view_indices.append(str(idx))
+                        break
+        if view_indices:
+            folder_name += f"_view_{'-'.join(view_indices)}"
 
     if args.mask:
-        folder_name += "_sam"
+        folder_name += "_masked"
     else:
-        folder_name += "_nosam"
+        folder_name += "_nomask"
 
     if args.scale_pointcloud:
         folder_name += "_scaled"
@@ -530,7 +602,10 @@ def demo_fn(args):
     
     folder_name += f"_conf{args.conf_thres_value}"
 
-    sparse_reconstruction_dir = os.path.join(args.scene_dir, folder_name)
+    # Put output under sam3d_multiview_prediction directory
+    output_base_dir = os.path.join(args.scene_dir, "sam3d_multiview_prediction")
+    os.makedirs(output_base_dir, exist_ok=True)
+    sparse_reconstruction_dir = os.path.join(output_base_dir, folder_name)
 
     # if args.mask:
     #     if args.use_ba:

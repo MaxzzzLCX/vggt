@@ -150,3 +150,7 @@ skyseg.onnx
 
 # My scenes for testing
 scenes/
+
+# My debug related files
+debug_masks/
+debug_self_masks/
